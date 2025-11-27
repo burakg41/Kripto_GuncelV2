@@ -169,28 +169,38 @@ class AIAnalyst:
         genai.configure(api_key=api_key)
 
     def _get_working_model(self):
-        """Çalışan bir model bulmak için otomatik tarama yapar."""
-        preferred_models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro', 'gemini-pro']
-        
-        # 1. Önce tercih edilenleri dene
-        for model_name in preferred_models:
-            try:
-                model = genai.GenerativeModel(model_name)
-                # Küçük bir test sorgusu atma (isteğe bağlı, maliyet yaratabilir)
-                # Ancak burada sadece obje yaratıyoruz, hata verirse except'e düşer
-                return model
-            except Exception:
-                continue
-        
-        # 2. Hiçbiri olmazsa API'den listele ve ilk text modelini al
+        """API'den erişilebilir modelleri listeler ve en iyisini seçer."""
         try:
+            # Kullanıcının erişebildiği modelleri listele
+            available_models = []
             for m in genai.list_models():
                 if 'generateContent' in m.supported_generation_methods:
-                    return genai.GenerativeModel(m.name)
-        except Exception as e:
-            return None
-        
-        return None
+                    available_models.append(m.name)
+            
+            # Tercih edilen model sırası
+            priorities = [
+                'models/gemini-1.5-flash',
+                'models/gemini-1.5-pro',
+                'models/gemini-1.0-pro',
+                'models/gemini-pro'
+            ]
+            
+            # 1. Öncelikli listeden eşleşen var mı?
+            for priority in priorities:
+                if priority in available_models:
+                    return genai.GenerativeModel(priority)
+            
+            # 2. Yoksa, isminde 'gemini' geçen herhangi bir modeli al
+            for model_name in available_models:
+                if 'gemini' in model_name:
+                    return genai.GenerativeModel(model_name)
+
+            # 3. Hiçbiri yoksa varsayılan eski modeli dene (son çare)
+            return genai.GenerativeModel('gemini-pro')
+            
+        except Exception:
+            # API listeleme hatası verirse (yetki vb.) körleme eski modeli dene
+            return genai.GenerativeModel('gemini-pro')
 
     def analyze_market_structure(self, df, news_context, symbol, mode):
         last = df.iloc[-1]
@@ -208,19 +218,18 @@ class AIAnalyst:
         4. Risk Uyarısı
         """
         try:
-            # Model Bulucu
+            # Otomatik model seçimi
             model = self._get_working_model()
-            if not model:
-                return "HATA: API Anahtarınızla erişilebilen uygun bir Gemini modeli bulunamadı."
-            
             response = model.generate_content(prompt)
-            return f"**Kullanılan Model:** `{model.model_name}`\n\n{response.text}"
+            # Hangi modelin kullanıldığını rapora ekleyelim
+            model_info = f"*(Kullanılan Model: {model.model_name})*\n\n"
+            return model_info + response.text
         except Exception as e:
-            return f"AI Analiz Hatası: {str(e)}\n\n*Lütfen API anahtarınızın geçerli olduğundan ve Google AI Studio'da yetkili olduğundan emin olun.*"
+            return f"AI Analiz Hatası: {str(e)}\n\n*API anahtarınızı kontrol edin veya model erişim yetkilerini doğrulayın.*"
 
     def analyze_chart_image(self, image, user_prompt):
         try:
-            # Vision için ayrı model gerekir
+            # Görsel analiz için de benzer bir fallback mantığı
             try:
                 model = genai.GenerativeModel('gemini-1.5-flash')
                 return model.generate_content([f"Grafik analizi yap: {user_prompt}", image]).text
