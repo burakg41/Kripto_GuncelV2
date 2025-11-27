@@ -168,45 +168,55 @@ class AIAnalyst:
     def __init__(self, api_key):
         genai.configure(api_key=api_key)
 
-    def _generate_safe(self, prompt, image=None):
-        """
-        Deneysel modeller yerine sadece kararlı modelleri dener.
-        429 (Kota) hatası alırsa bekleyip diğer modele geçer.
-        """
-        # Öncelik sırası: En hızlı ve kotası bol olandan başla
-        candidate_models = [
-            'gemini-1.5-flash',       # En yüksek kota, en hızlı
-            'gemini-1.5-flash-latest',
-            'gemini-1.5-pro',         # Daha zeki, orta kota
-            'gemini-pro'              # Eski ama kararlı
-        ]
-        
-        last_error = None
-
-        for model_name in candidate_models:
-            try:
-                model = genai.GenerativeModel(model_name)
-                
-                # İstek gönder (Görsel varsa veya yoksa)
-                if image:
-                    response = model.generate_content([prompt, image])
-                else:
-                    response = model.generate_content(prompt)
-                
-                return f"**(Model: {model_name})**\n\n{response.text}"
+    def _get_best_model(self):
+        """API'den erişilebilir modelleri dinamik olarak bulur."""
+        try:
+            # Kullanıcının yetkisi olan modelleri listele
+            available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
             
-            except Exception as e:
-                error_str = str(e)
-                # Eğer 429 (Too Many Requests) veya 404 (Model Yok) ise sonraki modele geç
-                if "429" in error_str or "quota" in error_str.lower() or "404" in error_str:
-                    time.sleep(1) # Kısa bir bekleme yap
-                    last_error = error_str
-                    continue
-                else:
-                    # Başka bir hataysa (örn: API key geçersiz) direkt döndür
-                    return f"Kritik Hata ({model_name}): {error_str}"
+            # Tercih sırası (Flash > Pro > Eski Sürümler)
+            preferences = [
+                'models/gemini-1.5-flash',
+                'models/gemini-1.5-flash-latest',
+                'models/gemini-1.5-pro',
+                'models/gemini-1.5-pro-latest',
+                'models/gemini-1.0-pro',
+                'models/gemini-pro'
+            ]
+            
+            # 1. Öncelik listesinden var mı?
+            for pref in preferences:
+                if pref in available_models:
+                    return pref
+            
+            # 2. Yoksa, içinde 'gemini' geçen herhangi bir modeli al
+            for m in available_models:
+                if 'gemini' in m:
+                    return m
+            
+            # 3. Hiçbiri yoksa varsayılan
+            return 'gemini-1.5-flash'
+            
+        except Exception:
+            # Listeleme hatası olursa (API Key kısıtlıysa) en standart olanı dene
+            return 'gemini-1.5-flash'
+
+    def _generate_safe(self, prompt, image=None):
+        # Otomatik olarak en iyi modeli seç
+        model_name = self._get_best_model()
         
-        return f"Tüm modeller denendi ancak başarısız oldu. Son hata: {last_error}"
+        try:
+            model = genai.GenerativeModel(model_name)
+            
+            if image:
+                response = model.generate_content([prompt, image])
+            else:
+                response = model.generate_content(prompt)
+            
+            return f"**(Model: {model_name})**\n\n{response.text}"
+        
+        except Exception as e:
+            return f"AI Hatası ({model_name}): {str(e)}\n\nLütfen API anahtarınızın geçerli olduğundan emin olun."
 
     def analyze_market_structure(self, df, news_context, symbol, mode):
         last = df.iloc[-1]
