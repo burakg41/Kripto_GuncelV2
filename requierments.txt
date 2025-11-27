@@ -2,7 +2,6 @@ streamlit
 pandas
 numpy<2.0.0
 scipy
-pandas_ta
 ccxt
 plotly
 google-generativeai
