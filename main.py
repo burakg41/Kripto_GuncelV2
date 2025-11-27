@@ -168,39 +168,45 @@ class AIAnalyst:
     def __init__(self, api_key):
         genai.configure(api_key=api_key)
 
-    def _get_working_model(self):
-        """API'den erişilebilir modelleri listeler ve en iyisini seçer."""
-        try:
-            # Kullanıcının erişebildiği modelleri listele
-            available_models = []
-            for m in genai.list_models():
-                if 'generateContent' in m.supported_generation_methods:
-                    available_models.append(m.name)
-            
-            # Tercih edilen model sırası
-            priorities = [
-                'models/gemini-1.5-flash',
-                'models/gemini-1.5-pro',
-                'models/gemini-1.0-pro',
-                'models/gemini-pro'
-            ]
-            
-            # 1. Öncelikli listeden eşleşen var mı?
-            for priority in priorities:
-                if priority in available_models:
-                    return genai.GenerativeModel(priority)
-            
-            # 2. Yoksa, isminde 'gemini' geçen herhangi bir modeli al
-            for model_name in available_models:
-                if 'gemini' in model_name:
-                    return genai.GenerativeModel(model_name)
+    def _generate_safe(self, prompt, image=None):
+        """
+        Deneysel modeller yerine sadece kararlı modelleri dener.
+        429 (Kota) hatası alırsa bekleyip diğer modele geçer.
+        """
+        # Öncelik sırası: En hızlı ve kotası bol olandan başla
+        candidate_models = [
+            'gemini-1.5-flash',       # En yüksek kota, en hızlı
+            'gemini-1.5-flash-latest',
+            'gemini-1.5-pro',         # Daha zeki, orta kota
+            'gemini-pro'              # Eski ama kararlı
+        ]
+        
+        last_error = None
 
-            # 3. Hiçbiri yoksa varsayılan eski modeli dene (son çare)
-            return genai.GenerativeModel('gemini-pro')
+        for model_name in candidate_models:
+            try:
+                model = genai.GenerativeModel(model_name)
+                
+                # İstek gönder (Görsel varsa veya yoksa)
+                if image:
+                    response = model.generate_content([prompt, image])
+                else:
+                    response = model.generate_content(prompt)
+                
+                return f"**(Model: {model_name})**\n\n{response.text}"
             
-        except Exception:
-            # API listeleme hatası verirse (yetki vb.) körleme eski modeli dene
-            return genai.GenerativeModel('gemini-pro')
+            except Exception as e:
+                error_str = str(e)
+                # Eğer 429 (Too Many Requests) veya 404 (Model Yok) ise sonraki modele geç
+                if "429" in error_str or "quota" in error_str.lower() or "404" in error_str:
+                    time.sleep(1) # Kısa bir bekleme yap
+                    last_error = error_str
+                    continue
+                else:
+                    # Başka bir hataysa (örn: API key geçersiz) direkt döndür
+                    return f"Kritik Hata ({model_name}): {error_str}"
+        
+        return f"Tüm modeller denendi ancak başarısız oldu. Son hata: {last_error}"
 
     def analyze_market_structure(self, df, news_context, symbol, mode):
         last = df.iloc[-1]
@@ -217,27 +223,11 @@ class AIAnalyst:
         3. İşlem Fırsatı (Giriş/Stop/Hedef)
         4. Risk Uyarısı
         """
-        try:
-            # Otomatik model seçimi
-            model = self._get_working_model()
-            response = model.generate_content(prompt)
-            # Hangi modelin kullanıldığını rapora ekleyelim
-            model_info = f"*(Kullanılan Model: {model.model_name})*\n\n"
-            return model_info + response.text
-        except Exception as e:
-            return f"AI Analiz Hatası: {str(e)}\n\n*API anahtarınızı kontrol edin veya model erişim yetkilerini doğrulayın.*"
+        return self._generate_safe(prompt)
 
     def analyze_chart_image(self, image, user_prompt):
-        try:
-            # Görsel analiz için de benzer bir fallback mantığı
-            try:
-                model = genai.GenerativeModel('gemini-1.5-flash')
-                return model.generate_content([f"Grafik analizi yap: {user_prompt}", image]).text
-            except:
-                model = genai.GenerativeModel('gemini-pro-vision')
-                return model.generate_content([f"Grafik analizi yap: {user_prompt}", image]).text
-        except Exception as e:
-             return f"Görsel Analiz Hatası: {str(e)}"
+        full_prompt = f"Sen uzman bir teknik analistsin. Grafik analizi yap: {user_prompt}"
+        return self._generate_safe(full_prompt, image=image)
 
 # =============================================================================
 # 3. GRAFİK FONKSİYONLARI
