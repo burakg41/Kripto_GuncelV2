@@ -1,8 +1,9 @@
 streamlit
 pandas
-numpy
+numpy<2.0.0
+scipy
 ccxt
 plotly
-google-generativeai>=0.8.3
+google-generativeai
 feedparser
 Pillow
