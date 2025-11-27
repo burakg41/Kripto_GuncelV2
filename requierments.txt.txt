@@ -1,0 +1,9 @@
+streamlit
+pandas
+numpy
+pandas_ta
+ccxt
+plotly
+google-generativeai
+feedparser
+Pillow
