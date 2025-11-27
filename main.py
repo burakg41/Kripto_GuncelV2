@@ -1,6 +1,19 @@
 import streamlit as st
 import pandas as pd
-import pandas_ta as ta
+
+# --- pandas_ta için otomatik yükleme fallback'i ---
+try:
+    import pandas_ta as ta
+except ModuleNotFoundError:
+    import subprocess, sys
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "pandas_ta"])
+        import pandas_ta as ta
+    except Exception as e:
+        st.error(f"pandas_ta kütüphanesi yüklenemedi: {e}")
+        st.stop()
+# -----------------------------------------------
+
 import ccxt
 import google.generativeai as genai
 import plotly.graph_objects as go
@@ -93,7 +106,8 @@ class MarketDataService:
     @staticmethod
     def add_indicators(df):
         """Gelişmiş Teknik İndikatörler ve Formasyonlar."""
-        if df.empty: return df
+        if df.empty:
+            return df
         
         # --- Trend İndikatörleri ---
         df['RSI'] = ta.rsi(df['close'], length=14)
@@ -175,40 +189,129 @@ class AIAnalyst:
 # =============================================================================
 
 def create_advanced_chart(df, symbol):
-    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, 
-                        vertical_spacing=0.03, 
-                        subplot_titles=(f'{symbol} Fiyat & Formasyonlar', 'Momentum (RSI)', 'Trend Gücü (ADX)'),
-                        row_heights=[0.6, 0.2, 0.2])
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=True, 
+        vertical_spacing=0.03, 
+        subplot_titles=(
+            f'{symbol} Fiyat & Formasyonlar',
+            'Momentum (RSI)',
+            'Trend Gücü (ADX)'
+        ),
+        row_heights=[0.6, 0.2, 0.2]
+    )
 
     # 1. Ana Grafik: Mumlar ve Ortalamalar
-    fig.add_trace(go.Candlestick(x=df['timestamp'],
-                open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='Fiyat'), row=1, col=1)
+    fig.add_trace(
+        go.Candlestick(
+            x=df['timestamp'],
+            open=df['open'],
+            high=df['high'],
+            low=df['low'],
+            close=df['close'],
+            name='Fiyat'
+        ),
+        row=1,
+        col=1
+    )
 
     # EMA'lar
-    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['EMA_50'], line=dict(color='#00e676', width=1), name='EMA 50'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['EMA_200'], line=dict(color='#2962ff', width=2), name='EMA 200'), row=1, col=1)
+    fig.add_trace(
+        go.Scatter(
+            x=df['timestamp'],
+            y=df['EMA_50'],
+            line=dict(color='#00e676', width=1),
+            name='EMA 50'
+        ),
+        row=1,
+        col=1
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df['timestamp'],
+            y=df['EMA_200'],
+            line=dict(color='#2962ff', width=2),
+            name='EMA 200'
+        ),
+        row=1,
+        col=1
+    )
     
     # Formasyon İşaretleme (Doji)
     doji_points = df[df['DOJI'] != 0]
     if not doji_points.empty:
-         fig.add_trace(go.Scatter(x=doji_points['timestamp'], y=doji_points['high'], mode='markers', marker=dict(symbol='diamond', size=5, color='yellow'), name='Doji'), row=1, col=1)
+        fig.add_trace(
+            go.Scatter(
+                x=doji_points['timestamp'],
+                y=doji_points['high'],
+                mode='markers',
+                marker=dict(symbol='diamond', size=5, color='yellow'),
+                name='Doji'
+            ),
+            row=1,
+            col=1
+        )
 
     # Bollinger Bands (Alan Olarak)
     bb_upper = df.columns[df.columns.str.contains('BBU')][0]
     bb_lower = df.columns[df.columns.str.contains('BBL')][0]
-    fig.add_trace(go.Scatter(x=df['timestamp'], y=df[bb_upper], line=dict(color='rgba(255, 255, 255, 0)'), showlegend=False), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df['timestamp'], y=df[bb_lower], fill='tonexty', fillcolor='rgba(0, 230, 118, 0.05)', line=dict(color='rgba(255, 255, 255, 0)'), name='BB Alanı'), row=1, col=1)
+    fig.add_trace(
+        go.Scatter(
+            x=df['timestamp'],
+            y=df[bb_upper],
+            line=dict(color='rgba(255, 255, 255, 0)'),
+            showlegend=False
+        ),
+        row=1,
+        col=1
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df['timestamp'],
+            y=df[bb_lower],
+            fill='tonexty',
+            fillcolor='rgba(0, 230, 118, 0.05)',
+            line=dict(color='rgba(255, 255, 255, 0)'),
+            name='BB Alanı'
+        ),
+        row=1,
+        col=1
+    )
 
     # 2. Grafik: RSI
-    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['RSI'], line=dict(color='#ab47bc', width=2), name='RSI'), row=2, col=1)
+    fig.add_trace(
+        go.Scatter(
+            x=df['timestamp'],
+            y=df['RSI'],
+            line=dict(color='#ab47bc', width=2),
+            name='RSI'
+        ),
+        row=2,
+        col=1
+    )
     fig.add_hline(y=70, line_dash="dot", line_color="red", row=2, col=1)
     fig.add_hline(y=30, line_dash="dot", line_color="green", row=2, col=1)
 
     # 3. Grafik: ADX
-    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['ADX'], line=dict(color='#ff9100', width=2), name='ADX'), row=3, col=1)
+    fig.add_trace(
+        go.Scatter(
+            x=df['timestamp'],
+            y=df['ADX'],
+            line=dict(color='#ff9100', width=2),
+            name='ADX'
+        ),
+        row=3,
+        col=1
+    )
     fig.add_hline(y=25, line_dash="solid", line_color="gray", annotation_text="Trend Sınırı", row=3, col=1)
 
-    fig.update_layout(template="plotly_dark", height=900, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10))
+    fig.update_layout(
+        template="plotly_dark",
+        height=900,
+        xaxis_rangeslider_visible=False,
+        margin=dict(l=10, r=10, t=30, b=10)
+    )
     return fig
 
 def create_depth_chart(bids, asks):
@@ -219,8 +322,24 @@ def create_depth_chart(bids, asks):
     bids['total'] = bids['amount'].cumsum()
     asks['total'] = asks['amount'].cumsum()
 
-    fig.add_trace(go.Scatter(x=bids['price'], y=bids['total'], fill='tozeroy', name='Alıcılar (Bids)', line=dict(color='#00e676')))
-    fig.add_trace(go.Scatter(x=asks['price'], y=asks['total'], fill='tozeroy', name='Satıcılar (Asks)', line=dict(color='#ff1744')))
+    fig.add_trace(
+        go.Scatter(
+            x=bids['price'],
+            y=bids['total'],
+            fill='tozeroy',
+            name='Alıcılar (Bids)',
+            line=dict(color='#00e676')
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=asks['price'],
+            y=asks['total'],
+            fill='tozeroy',
+            name='Satıcılar (Asks)',
+            line=dict(color='#ff1744')
+        )
+    )
 
     fig.update_layout(
         title="Piyasa Derinliği (Market Depth)",
@@ -290,8 +409,10 @@ def main():
         
         # Basit Sinyal Mantığı
         signal = "NÖTR"
-        if df['RSI'].iloc[-1] < 30: signal = "AŞIRI SATIM (Al Fırsatı?)"
-        elif df['RSI'].iloc[-1] > 70: signal = "AŞIRI ALIM (Sat Fırsatı?)"
+        if df['RSI'].iloc[-1] < 30:
+            signal = "AŞIRI SATIM (Al Fırsatı?)"
+        elif df['RSI'].iloc[-1] > 70:
+            signal = "AŞIRI ALIM (Sat Fırsatı?)"
         col5.metric("Teknik Sinyal", signal)
 
     # --- TAB YAPISI ---
@@ -305,8 +426,10 @@ def main():
         with st.expander("🔍 Tespit Edilen Mum Formasyonları"):
             last_candles = df.tail(5)
             found_patterns = []
-            if (last_candles['DOJI'] != 0).any(): found_patterns.append("Doji (Kararsızlık)")
-            if (last_candles['ENGULFING'] != 0).any(): found_patterns.append("Engulfing (Yutma/Dönüş)")
+            if (last_candles['DOJI'] != 0).any():
+                found_patterns.append("Doji (Kararsızlık)")
+            if (last_candles['ENGULFING'] != 0).any():
+                found_patterns.append("Engulfing (Yutma/Dönüş)")
             
             if found_patterns:
                 st.success(f"Son 5 mumda tespit edilenler: {', '.join(found_patterns)}")
