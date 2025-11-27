@@ -170,43 +170,37 @@ class AIAnalyst:
 
     def _generate_safe(self, prompt, image=None):
         """
-        Deneysel modeller yerine sadece kararlı modelleri dener.
-        429 (Kota) hatası alırsa bekleyip diğer modele geçer.
+        Deneysel modelleri ASLA kullanmaz.
+        Sadece kota dostu kararlı modelleri sırayla dener.
         """
-        # Öncelik sırası: En hızlı ve kotası bol olandan başla
-        # Sadece kararlı sürümler. Experimental sürümleri listeye eklemiyoruz.
+        # Sadece bu listeyi kullan, asla list_models() yapma.
         candidate_models = [
-            'gemini-1.5-flash',       
-            'gemini-1.5-pro',         
-            'gemini-pro'              
+            'gemini-1.5-flash',       # En Hızlı / Yüksek Kota
+            'gemini-1.5-pro',         # Daha Akıllı / Orta Kota
+            'gemini-pro'              # Eski Kararlı Sürüm
         ]
         
-        last_error = None
+        errors = []
 
         for model_name in candidate_models:
             try:
                 model = genai.GenerativeModel(model_name)
                 
-                # İstek gönder (Görsel varsa veya yoksa)
                 if image:
                     response = model.generate_content([prompt, image])
                 else:
                     response = model.generate_content(prompt)
                 
-                return f"**(Model: {model_name})**\n\n{response.text}"
+                return f"**(Analiz Modeli: {model_name})**\n\n{response.text}"
             
             except Exception as e:
-                error_str = str(e)
-                # 429: Too Many Requests / Quota, 404: Not Found
-                if any(x in error_str for x in ["429", "quota", "404", "503", "limit"]):
-                    time.sleep(1) # Kısa bir bekleme yap
-                    last_error = error_str
-                    continue
-                else:
-                    # Başka bir hataysa (örn: API key geçersiz) direkt döndür
-                    return f"Kritik Hata ({model_name}): {error_str}"
+                # Hatayı kaydet, 1 saniye bekle, sıradaki modele geç
+                errors.append(f"{model_name} Hatası: {str(e)}")
+                time.sleep(1)
+                continue
         
-        return f"Tüm modeller denendi ancak başarısız oldu. Son hata: {last_error}"
+        # Hiçbiri çalışmazsa hatayı göster
+        return "⚠️ Üzgünüz, şu an tüm AI modelleri meşgul veya kotanız dolu. Hata detayları:\n\n" + "\n\n".join(errors)
 
     def analyze_market_structure(self, df, news_context, symbol, mode):
         last = df.iloc[-1]
