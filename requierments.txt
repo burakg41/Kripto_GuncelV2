@@ -1,5 +1,10 @@
-pandas-ta
-pandas
-numpy
-requests
 streamlit
+pandas
+numpy<2.0.0
+scipy
+pandas-ta
+ccxt
+plotly
+google-generativeai
+feedparser
+Pillow
