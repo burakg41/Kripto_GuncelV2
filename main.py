@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import ccxt
 import google.generativeai as genai
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -8,16 +9,6 @@ import feedparser
 from PIL import Image
 import time
 import numpy as np
-
-# ---------------------------------------------------------
-# ccxt'i güvenli şekilde import et (ModuleNotFound hata vermesin)
-# ---------------------------------------------------------
-try:
-    import ccxt
-    CCXT_AVAILABLE = True
-except ModuleNotFoundError:
-    ccxt = None
-    CCXT_AVAILABLE = False
 
 # =============================================================================
 # 1. KONFİGÜRASYON VE TEMA
@@ -30,7 +21,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Özel CSS ile Modern Görünüm (Glassmorphism)
 st.markdown("""
     <style>
         .main { background-color: #0e1117; }
@@ -41,24 +31,18 @@ st.markdown("""
         .stTabs [data-baseweb="tab-list"] { gap: 10px; }
         .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: #1e2130; border-radius: 5px; color: white; }
         .stTabs [aria-selected="true"] { background-color: #00e676; color: black; }
-        /* Tablo özelleştirme */
         [data-testid="stDataFrame"] { border: 1px solid #2e3440; border-radius: 5px; }
     </style>
 """, unsafe_allow_html=True)
 
 # =============================================================================
-# 2. HİZMET SINIFLARI (BACKEND LOGIC)
+# 2. HİZMET SINIFLARI
 # =============================================================================
 
 class MarketDataService:
-    """Borsa verilerini CCXT ile çeken gelişmiş servis."""
+    """Borsa verilerini CCXT ile çeken servis."""
     
     def __init__(self, exchange_id='binance'):
-        if not CCXT_AVAILABLE:
-            st.error("Bu ortamda 'ccxt' modülü kurulu değil; borsa verisi çekilemez.")
-            raise RuntimeError("ccxt not available")
-
-        # Dinamik Borsa Yükleme
         try:
             exchange_class = getattr(ccxt, exchange_id)
             self.exchange = exchange_class({'enableRateLimit': True})
@@ -69,9 +53,11 @@ class MarketDataService:
     @st.cache_data(ttl=30)
     def fetch_ohlcv(_self, symbol, timeframe, limit=200):
         try:
-            # CCXT ile veri çekme (Open, High, Low, Close, Volume)
             ohlcv = _self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df = pd.DataFrame(
+                ohlcv,
+                columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
+            )
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             return df
         except Exception:
@@ -79,7 +65,6 @@ class MarketDataService:
 
     @st.cache_data(ttl=15)
     def fetch_order_book(_self, symbol, limit=20):
-        """Derinlik analizi için Order Book verisi çeker."""
         try:
             orderbook = _self.exchange.fetch_order_book(symbol, limit)
             bids = pd.DataFrame(orderbook['bids'], columns=['price', 'amount'])
@@ -92,7 +77,6 @@ class MarketDataService:
 
     @st.cache_data(ttl=300)
     def fetch_crypto_news(_self):
-        """CoinDesk RSS beslemesinden haberleri çeker."""
         try:
             feed = feedparser.parse("https://www.coindesk.com/arc/outboundfeeds/rss/")
             news = []
@@ -104,7 +88,7 @@ class MarketDataService:
 
     @staticmethod
     def add_indicators(df):
-        """Gelişmiş Teknik İndikatörler ve Formasyonlar (pandas_ta'sız)."""
+        """RSI, EMA, MACD, BB, ATR, ADX, Doji, Engulfing (pandas ile)."""
         if df.empty:
             return df
 
@@ -168,12 +152,19 @@ class MarketDataService:
         minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
 
         tr_smooth = tr.rolling(window=adx_len, min_periods=adx_len).sum()
-        plus_di = 100 * (plus_dm.rolling(window=adx_len, min_periods=adx_len).sum() / tr_smooth.replace(0, np.nan))
-        minus_di = 100 * (minus_dm.rolling(window=adx_len, min_periods=adx_len).sum() / tr_smooth.replace(0, np.nan))
-        dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)) * 100
+        plus_di = 100 * (
+            plus_dm.rolling(window=adx_len, min_periods=adx_len).sum()
+            / tr_smooth.replace(0, np.nan)
+        )
+        minus_di = 100 * (
+            minus_dm.rolling(window=adx_len, min_periods=adx_len).sum()
+            / tr_smooth.replace(0, np.nan)
+        )
+        dx = ((plus_di - minus_di).abs()
+              / (plus_di + minus_di).replace(0, np.nan)) * 100
         adx = dx.rolling(window=adx_len, min_periods=adx_len).mean()
         df['ADX_14'] = adx
-        df['ADX'] = adx  # Kolay erişim için
+        df['ADX'] = adx
 
         # --- Mum Formasyonları ---
         body = (close - open_).abs()
@@ -199,25 +190,13 @@ class MarketDataService:
         return df
 
 class AIAnalyst:
-    """Google Gemini AI Entegrasyonu - Yapılandırılmış Analiz."""
+    """Google Gemini AI Analiz Motoru."""
     
-    def __init__(self, api_key, model_name="gemini-1.5-flash"):
-        self.model_name = model_name
+    def __init__(self, api_key):
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel(model_name)
-        self.vision_model = genai.GenerativeModel(model_name)
-
-    def _handle_error(self, e: Exception) -> str:
-        msg = str(e)
-        # Kota / rate limit / yetki hatalarını yakala
-        if "429" in msg or "quota" in msg.lower():
-            return (
-                "⚠️ Gemini API kota sınırına takıldı veya bu modele erişim yetkin yok.\n\n"
-                f"- Şu an seçili model: `{self.model_name}`\n"
-                "- Google AI Studio'da faturalandırma / kota ayarlarını kontrol edebilirsin.\n"
-                "- Ya da yan menüden daha hafif bir model (örn. `gemini-1.5-flash` veya `gemini-1.5-flash-8b`) seç.\n"
-            )
-        return f"AI Analiz Hatası: {msg}"
+        # Burada sabit olarak 1.5-flash kullanıyoruz
+        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        self.vision_model = genai.GenerativeModel('gemini-1.5-flash')
 
     def analyze_market_structure(self, df, news_context, symbol, mode):
         last = df.iloc[-1]
@@ -251,7 +230,8 @@ class AIAnalyst:
             response = self.model.generate_content(prompt)
             return response.text
         except Exception as e:
-            return self._handle_error(e)
+            # 429 dahil tüm hatayı olduğu gibi döndürür
+            return f"AI Analiz Hatası: {str(e)}"
 
     def analyze_chart_image(self, image, user_prompt):
         prompt = (
@@ -263,10 +243,10 @@ class AIAnalyst:
             response = self.vision_model.generate_content([prompt, image])
             return response.text
         except Exception as e:
-            return self._handle_error(e)
+            return f"Görsel Analiz Hatası: {str(e)}"
 
 # =============================================================================
-# 3. GRAFİK OLUŞTURUCULAR
+# 3. GRAFİKLER
 # =============================================================================
 
 def create_advanced_chart(df, symbol):
@@ -427,20 +407,10 @@ def create_depth_chart(bids, asks):
     return fig
 
 # =============================================================================
-# 4. ANA UYGULAMA MANTIĞI
+# 4. ANA UYGULAMA
 # =============================================================================
 
 def main():
-    if not CCXT_AVAILABLE:
-        st.error(
-            "Bu ortamda `ccxt` modülü bulunamadı.\n\n"
-            "- GitHub repo kök dizininde **requirements.txt** dosyası olduğundan\n"
-            "- Ve içinde şu satırın yer aldığından emin ol:\n\n"
-            "`ccxt`\n\n"
-            "Daha sonra Streamlit Cloud'da app'i yeniden deploy et."
-        )
-        st.stop()
-
     with st.sidebar:
         st.title("🦅 AlphaTrade Pro")
         
@@ -450,14 +420,6 @@ def main():
             if not api_key:
                 st.warning("Analiz motoru için API Key gereklidir.")
                 st.stop()
-
-        # Gemini model seçimi
-        gemini_model = st.selectbox(
-            "Gemini Model",
-            ["gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-2.0-flash-exp", "gemini-2.5-pro-exp"],
-            index=0,
-            help="Ücretsiz kullanım için genelde 'gemini-1.5-flash' veya 'gemini-1.5-flash-8b' uygundur."
-        )
         
         st.divider()
         
@@ -469,7 +431,7 @@ def main():
         trader_mode = st.radio("Yatırımcı Profili", ["Scalper (Dakikalık)", "Day Trader (Günlük)", "Swing (Haftalık)"])
         
     market_service = MarketDataService(exchange_id)
-    ai_engine = AIAnalyst(api_key, model_name=gemini_model)
+    ai_engine = AIAnalyst(api_key)
 
     st.subheader(f"⚡ {exchange_id.upper()} | {symbol} Terminali")
 
@@ -499,7 +461,9 @@ def main():
             signal = "AŞIRI ALIM (Sat Fırsatı?)"
         col5.metric("Teknik Sinyal", signal)
 
-    tab_chart, tab_depth, tab_ai, tab_vision = st.tabs(["📊 Pro Grafik", "🌊 Derinlik (Depth)", "🤖 AI Raporu", "👁️ Görsel Analiz"])
+    tab_chart, tab_depth, tab_ai, tab_vision = st.tabs(
+        ["📊 Pro Grafik", "🌊 Derinlik (Depth)", "🤖 AI Raporu", "👁️ Görsel Analiz"]
+    )
 
     with tab_chart:
         st.plotly_chart(create_advanced_chart(df, symbol), use_container_width=True)
