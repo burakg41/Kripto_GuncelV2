@@ -71,7 +71,6 @@ class MarketDataService:
 
     def fetch_ohlcv(self, symbol, timeframe, limit=200):
         try:
-            # Sembol formatı düzeltme
             if '/' not in symbol and 'USDT' in symbol:
                 symbol = symbol.replace('USDT', '/USDT')
             
@@ -98,12 +97,9 @@ class MarketDataService:
         try:
             if '/' not in symbol and 'USDT' in symbol:
                 symbol = symbol.replace('USDT', '/USDT')
-            
-            # Order book çekmeyi dene
             try:
                 orderbook = self.exchange.fetch_order_book(symbol, limit)
             except Exception:
-                # Hata alırsa marketleri yükleyip tekrar dene
                 self.exchange.load_markets()
                 orderbook = self.exchange.fetch_order_book(symbol, limit)
 
@@ -111,7 +107,6 @@ class MarketDataService:
             asks = pd.DataFrame(orderbook['asks'], columns=['price', 'amount'])
             return bids, asks
         except Exception as e:
-            # Sessizce geçiştirme, hatayı logla (debug için st.write kullanılabilir ama UI bozmamak için boş dönüyoruz)
             return pd.DataFrame(), pd.DataFrame()
 
     @st.cache_data(ttl=300)
@@ -128,7 +123,6 @@ class MarketDataService:
     @staticmethod
     def add_indicators(df):
         if df.empty: return df
-
         df = df.copy()
         close = df['close']
         high = df['high']
@@ -168,18 +162,35 @@ class MarketDataService:
             (close > open_) & (prev_close < prev_open) & (close > prev_open) & (open_ < prev_close), 
             1, 0
         )
-
         return df
 
 class AIAnalyst:
     def __init__(self, api_key):
         genai.configure(api_key=api_key)
-        # Model seçiminde esneklik: Önce Flash'ı dene
-        self.model_name = 'gemini-1.5-flash'
-        self.vision_model_name = 'gemini-1.5-flash'
 
-    def _get_model(self, model_name):
-        return genai.GenerativeModel(model_name)
+    def _get_working_model(self):
+        """Çalışan bir model bulmak için otomatik tarama yapar."""
+        preferred_models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro', 'gemini-pro']
+        
+        # 1. Önce tercih edilenleri dene
+        for model_name in preferred_models:
+            try:
+                model = genai.GenerativeModel(model_name)
+                # Küçük bir test sorgusu atma (isteğe bağlı, maliyet yaratabilir)
+                # Ancak burada sadece obje yaratıyoruz, hata verirse except'e düşer
+                return model
+            except Exception:
+                continue
+        
+        # 2. Hiçbiri olmazsa API'den listele ve ilk text modelini al
+        try:
+            for m in genai.list_models():
+                if 'generateContent' in m.supported_generation_methods:
+                    return genai.GenerativeModel(m.name)
+        except Exception as e:
+            return None
+        
+        return None
 
     def analyze_market_structure(self, df, news_context, symbol, mode):
         last = df.iloc[-1]
@@ -197,31 +208,27 @@ class AIAnalyst:
         4. Risk Uyarısı
         """
         try:
-            # Önce Flash modelini dene
-            model = self._get_model('gemini-1.5-flash')
-            return model.generate_content(prompt).text
+            # Model Bulucu
+            model = self._get_working_model()
+            if not model:
+                return "HATA: API Anahtarınızla erişilebilen uygun bir Gemini modeli bulunamadı."
+            
+            response = model.generate_content(prompt)
+            return f"**Kullanılan Model:** `{model.model_name}`\n\n{response.text}"
         except Exception as e:
-            # Eğer Flash bulunamazsa (404), Pro modeline geç
-            if "404" in str(e) or "not found" in str(e).lower():
-                try:
-                    model = self._get_model('gemini-pro')
-                    return model.generate_content(prompt).text + "\n\n*(Not: Analiz gemini-pro modeli ile yapıldı.)*"
-                except Exception as e2:
-                    return f"Yedek Model Hatası: {str(e2)}"
-            return f"AI Hatası: {str(e)}"
+            return f"AI Analiz Hatası: {str(e)}\n\n*Lütfen API anahtarınızın geçerli olduğundan ve Google AI Studio'da yetkili olduğundan emin olun.*"
 
     def analyze_chart_image(self, image, user_prompt):
         try:
-            model = self._get_model('gemini-1.5-flash')
-            return model.generate_content([f"Grafik analizi yap: {user_prompt}", image]).text
+            # Vision için ayrı model gerekir
+            try:
+                model = genai.GenerativeModel('gemini-1.5-flash')
+                return model.generate_content([f"Grafik analizi yap: {user_prompt}", image]).text
+            except:
+                model = genai.GenerativeModel('gemini-pro-vision')
+                return model.generate_content([f"Grafik analizi yap: {user_prompt}", image]).text
         except Exception as e:
-             if "404" in str(e) or "not found" in str(e).lower():
-                try:
-                    model = self._get_model('gemini-pro-vision')
-                    return model.generate_content([f"Grafik analizi yap: {user_prompt}", image]).text
-                except Exception as e2:
-                     return f"Görsel Analiz Yedek Model Hatası: {str(e2)}"
-             return f"Görsel Hatası: {str(e)}"
+             return f"Görsel Analiz Hatası: {str(e)}"
 
 # =============================================================================
 # 3. GRAFİK FONKSİYONLARI
@@ -229,22 +236,17 @@ class AIAnalyst:
 
 def create_advanced_chart(df, symbol):
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
-
     fig.add_trace(go.Candlestick(x=df['timestamp'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='Fiyat'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df['timestamp'], y=df['EMA_50'], line=dict(color='orange'), name='EMA 50'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df['timestamp'], y=df['EMA_200'], line=dict(color='blue'), name='EMA 200'), row=1, col=1)
-    
     fig.add_trace(go.Scatter(x=df['timestamp'], y=df['BBU_20_2.0'], line=dict(color='gray', width=0), showlegend=False), row=1, col=1)
     fig.add_trace(go.Scatter(x=df['timestamp'], y=df['BBL_20_2.0'], fill='tonexty', fillcolor='rgba(0,255,0,0.05)', line=dict(color='gray', width=0), name='BB'), row=1, col=1)
-
     doji = df[df['DOJI'] == 1]
     if not doji.empty:
         fig.add_trace(go.Scatter(x=doji['timestamp'], y=doji['high'], mode='markers', marker=dict(symbol='diamond', color='yellow'), name='Doji'), row=1, col=1)
-
     fig.add_trace(go.Scatter(x=df['timestamp'], y=df['RSI'], line=dict(color='purple'), name='RSI'), row=2, col=1)
     fig.add_hline(y=70, line_dash="dot", line_color="red", row=2, col=1)
     fig.add_hline(y=30, line_dash="dot", line_color="green", row=2, col=1)
-
     fig.update_layout(template="plotly_dark", height=800, xaxis_rangeslider_visible=False)
     return fig
 
@@ -257,14 +259,9 @@ def create_depth_chart(bids, asks):
         fig.add_trace(go.Scatter(x=asks['price'], y=asks['total'], fill='tozeroy', name='Satıcılar', line=dict(color='red')))
         fig.update_layout(template="plotly_dark", title="Piyasa Derinliği", height=400)
     else:
-        # Boş veri durumunda mesaj göster
         fig.update_layout(
-            template="plotly_dark", 
-            title="Piyasa Derinliği (Veri Yok)", 
-            height=400,
-            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-            annotations=[dict(text="Derinlik verisi çekilemedi veya borsa bağlantısı kısıtlı.", showarrow=False, font=dict(color="white", size=14))]
+            template="plotly_dark", title="Piyasa Derinliği (Veri Yok)", height=400,
+            annotations=[dict(text="Derinlik verisi çekilemedi.", showarrow=False, font=dict(color="white"))]
         )
     return fig
 
@@ -283,8 +280,6 @@ def main():
         if not api_key: st.stop()
         
         st.divider()
-        # Varsayılan Borsa OKX Yapıldı (index=4 -> OKX)
-        # Liste sırası: ["kraken", "coinbase", "binanceus", "binance", "okx", "kucoin"]
         exchange_id = st.selectbox("Borsa", ["kraken", "coinbase", "binanceus", "binance", "okx", "kucoin"], index=4)
         symbol = st.text_input("Parite", value="BTC/USDT").upper()
         timeframe = st.selectbox("Zaman", ["15m", "1h", "4h", "1d"], index=2)
@@ -299,11 +294,10 @@ def main():
         df = market.fetch_ohlcv(symbol, timeframe)
         if df.empty:
             st.error(f"Veri alınamadı. {exchange_id} borsasında {symbol} olmayabilir veya erişim engeli var.")
-            st.info("İPUCU: Streamlit Cloud (ABD) sunucularında 'kraken' veya 'coinbase' en iyi sonucu verir. Eğer OKX kullanıyorsanız, lokal çalışmada sorun olmayabilir ancak Cloud'da kısıtlanabilir.")
+            st.info("İPUCU: Streamlit Cloud (ABD) sunucularında 'kraken' veya 'coinbase' en iyi sonucu verir.")
             st.stop()
         
         df = market.add_indicators(df)
-        
         last = df.iloc[-1]
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Fiyat", f"${last['close']:,.2f}")
@@ -317,11 +311,9 @@ def main():
         st.plotly_chart(create_advanced_chart(df, symbol), use_container_width=True)
     
     with tab2:
-        # Derinlik Verisi Kontrolü
         bids, asks = market.fetch_order_book(symbol)
         st.plotly_chart(create_depth_chart(bids, asks), use_container_width=True)
-        if bids.empty:
-            st.warning(f"⚠️ {exchange_id.upper()} borsasından derinlik verisi çekilemedi. Bağlantı kısıtlaması olabilir.")
+        if bids.empty: st.warning("Derinlik verisi alınamadı.")
 
     with tab3:
         if st.button("AI Analizi Başlat"):
