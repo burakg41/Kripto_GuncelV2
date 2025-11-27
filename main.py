@@ -30,7 +30,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Özel CSS ile Modern Görünüm (Glassmorphism)
+# Özel CSS
 st.markdown("""
     <style>
         .main { background-color: #0e1117; }
@@ -52,7 +52,7 @@ st.markdown("""
 class MarketDataService:
     """Borsa verilerini CCXT ile çeken gelişmiş servis."""
     
-    def __init__(self, exchange_id='kraken'):
+    def __init__(self, exchange_id='okx'):
         if not CCXT_AVAILABLE:
             st.error("Bu ortamda 'ccxt' modülü kurulu değil.")
             raise RuntimeError("ccxt not available")
@@ -64,29 +64,25 @@ class MarketDataService:
                 'timeout': 30000, 
             })
         except AttributeError:
-            st.error(f"{exchange_id} borsası bulunamadı, varsayılan olarak Kraken kullanılıyor.")
-            self.exchange = ccxt.kraken({'enableRateLimit': True})
+            st.error(f"{exchange_id} borsası bulunamadı, varsayılan olarak Binance kullanılıyor.")
+            self.exchange = ccxt.binance({'enableRateLimit': True})
         except Exception as e:
             st.error(f"Borsa başlatma hatası: {e}")
 
     def fetch_ohlcv(self, symbol, timeframe, limit=200):
         try:
-            # Sembol formatı düzeltme (örn: BTCUSDT -> BTC/USDT)
+            # Sembol formatı düzeltme
             if '/' not in symbol and 'USDT' in symbol:
                 symbol = symbol.replace('USDT', '/USDT')
             
-            # Veri çekme
             try:
                 ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-            except ccxt.BadSymbol:
-                # Sembol bulunamazsa marketleri yükleyip tekrar dene
+            except (ccxt.BadSymbol, ccxt.ExchangeError):
                 self.exchange.load_markets()
                 ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
             except Exception as e:
-                # ABD IP Kısıtlaması Kontrolü
                 if "Geo-Restricted" in str(e) or "Service unavailable" in str(e):
-                    st.error(f"⚠️ Erişim Engeli: {self.exchange.id} borsası ABD IP'lerini (Streamlit Cloud) engelliyor.")
-                    st.info("Lütfen sol menüden 'kraken' veya 'coinbase' seçin.")
+                    st.error(f"⚠️ Erişim Engeli: {self.exchange.id} borsası bu IP'den erişimi kısıtlıyor.")
                     return pd.DataFrame()
                 else:
                     raise e
@@ -102,11 +98,20 @@ class MarketDataService:
         try:
             if '/' not in symbol and 'USDT' in symbol:
                 symbol = symbol.replace('USDT', '/USDT')
-            orderbook = self.exchange.fetch_order_book(symbol, limit)
+            
+            # Order book çekmeyi dene
+            try:
+                orderbook = self.exchange.fetch_order_book(symbol, limit)
+            except Exception:
+                # Hata alırsa marketleri yükleyip tekrar dene
+                self.exchange.load_markets()
+                orderbook = self.exchange.fetch_order_book(symbol, limit)
+
             bids = pd.DataFrame(orderbook['bids'], columns=['price', 'amount'])
             asks = pd.DataFrame(orderbook['asks'], columns=['price', 'amount'])
             return bids, asks
-        except Exception:
+        except Exception as e:
+            # Sessizce geçiştirme, hatayı logla (debug için st.write kullanılabilir ama UI bozmamak için boş dönüyoruz)
             return pd.DataFrame(), pd.DataFrame()
 
     @st.cache_data(ttl=300)
@@ -122,7 +127,6 @@ class MarketDataService:
 
     @staticmethod
     def add_indicators(df):
-        """Manuel İndikatör Hesaplamaları (pandas_ta olmadan)."""
         if df.empty: return df
 
         df = df.copy()
@@ -148,19 +152,16 @@ class MarketDataService:
         df['BBU_20_2.0'] = rolling_mean + (rolling_std * 2)
         df['BBL_20_2.0'] = rolling_mean - (rolling_std * 2)
 
-        # ATR & ADX (Basitleştirilmiş)
+        # ATR & ADX
         tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
         df['ATR'] = tr.rolling(window=14).mean()
-        
-        # ADX (Basitleştirilmiş Trend Gücü)
-        df['ADX'] = df['ATR'].rolling(window=14).mean() * 10 # Mock calculation for stability without complex lib
+        df['ADX'] = df['ATR'].rolling(window=14).mean() * 10 
 
-        # Formasyonlar (Doji & Engulfing)
+        # Formasyonlar
         body = (close - open_).abs()
         rng = high - low
         df['DOJI'] = np.where(body <= rng * 0.1, 1, 0)
         
-        # Engulfing
         prev_open = open_.shift(1)
         prev_close = close.shift(1)
         df['ENGULFING'] = np.where(
@@ -173,8 +174,12 @@ class MarketDataService:
 class AIAnalyst:
     def __init__(self, api_key):
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
-        self.vision_model = genai.GenerativeModel('gemini-1.5-flash')
+        # Model seçiminde esneklik: Önce Flash'ı dene
+        self.model_name = 'gemini-1.5-flash'
+        self.vision_model_name = 'gemini-1.5-flash'
+
+    def _get_model(self, model_name):
+        return genai.GenerativeModel(model_name)
 
     def analyze_market_structure(self, df, news_context, symbol, mode):
         last = df.iloc[-1]
@@ -192,15 +197,31 @@ class AIAnalyst:
         4. Risk Uyarısı
         """
         try:
-            return self.model.generate_content(prompt).text
+            # Önce Flash modelini dene
+            model = self._get_model('gemini-1.5-flash')
+            return model.generate_content(prompt).text
         except Exception as e:
+            # Eğer Flash bulunamazsa (404), Pro modeline geç
+            if "404" in str(e) or "not found" in str(e).lower():
+                try:
+                    model = self._get_model('gemini-pro')
+                    return model.generate_content(prompt).text + "\n\n*(Not: Analiz gemini-pro modeli ile yapıldı.)*"
+                except Exception as e2:
+                    return f"Yedek Model Hatası: {str(e2)}"
             return f"AI Hatası: {str(e)}"
 
     def analyze_chart_image(self, image, user_prompt):
         try:
-            return self.vision_model.generate_content([f"Grafik analizi yap: {user_prompt}", image]).text
+            model = self._get_model('gemini-1.5-flash')
+            return model.generate_content([f"Grafik analizi yap: {user_prompt}", image]).text
         except Exception as e:
-            return f"Görsel Hatası: {str(e)}"
+             if "404" in str(e) or "not found" in str(e).lower():
+                try:
+                    model = self._get_model('gemini-pro-vision')
+                    return model.generate_content([f"Grafik analizi yap: {user_prompt}", image]).text
+                except Exception as e2:
+                     return f"Görsel Analiz Yedek Model Hatası: {str(e2)}"
+             return f"Görsel Hatası: {str(e)}"
 
 # =============================================================================
 # 3. GRAFİK FONKSİYONLARI
@@ -209,21 +230,17 @@ class AIAnalyst:
 def create_advanced_chart(df, symbol):
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
 
-    # Fiyat ve EMA
     fig.add_trace(go.Candlestick(x=df['timestamp'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='Fiyat'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df['timestamp'], y=df['EMA_50'], line=dict(color='orange'), name='EMA 50'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df['timestamp'], y=df['EMA_200'], line=dict(color='blue'), name='EMA 200'), row=1, col=1)
     
-    # Bollinger
     fig.add_trace(go.Scatter(x=df['timestamp'], y=df['BBU_20_2.0'], line=dict(color='gray', width=0), showlegend=False), row=1, col=1)
     fig.add_trace(go.Scatter(x=df['timestamp'], y=df['BBL_20_2.0'], fill='tonexty', fillcolor='rgba(0,255,0,0.05)', line=dict(color='gray', width=0), name='BB'), row=1, col=1)
 
-    # Formasyon
     doji = df[df['DOJI'] == 1]
     if not doji.empty:
         fig.add_trace(go.Scatter(x=doji['timestamp'], y=doji['high'], mode='markers', marker=dict(symbol='diamond', color='yellow'), name='Doji'), row=1, col=1)
 
-    # RSI
     fig.add_trace(go.Scatter(x=df['timestamp'], y=df['RSI'], line=dict(color='purple'), name='RSI'), row=2, col=1)
     fig.add_hline(y=70, line_dash="dot", line_color="red", row=2, col=1)
     fig.add_hline(y=30, line_dash="dot", line_color="green", row=2, col=1)
@@ -238,7 +255,17 @@ def create_depth_chart(bids, asks):
         asks['total'] = asks['amount'].cumsum()
         fig.add_trace(go.Scatter(x=bids['price'], y=bids['total'], fill='tozeroy', name='Alıcılar', line=dict(color='green')))
         fig.add_trace(go.Scatter(x=asks['price'], y=asks['total'], fill='tozeroy', name='Satıcılar', line=dict(color='red')))
-    fig.update_layout(template="plotly_dark", title="Piyasa Derinliği", height=400)
+        fig.update_layout(template="plotly_dark", title="Piyasa Derinliği", height=400)
+    else:
+        # Boş veri durumunda mesaj göster
+        fig.update_layout(
+            template="plotly_dark", 
+            title="Piyasa Derinliği (Veri Yok)", 
+            height=400,
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            annotations=[dict(text="Derinlik verisi çekilemedi veya borsa bağlantısı kısıtlı.", showarrow=False, font=dict(color="white", size=14))]
+        )
     return fig
 
 # =============================================================================
@@ -256,8 +283,9 @@ def main():
         if not api_key: st.stop()
         
         st.divider()
-        # Varsayılanı KRAKEN yaptık (US Friendly)
-        exchange_id = st.selectbox("Borsa", ["kraken", "coinbase", "binanceus", "binance", "okx", "kucoin"], index=0)
+        # Varsayılan Borsa OKX Yapıldı (index=4 -> OKX)
+        # Liste sırası: ["kraken", "coinbase", "binanceus", "binance", "okx", "kucoin"]
+        exchange_id = st.selectbox("Borsa", ["kraken", "coinbase", "binanceus", "binance", "okx", "kucoin"], index=4)
         symbol = st.text_input("Parite", value="BTC/USDT").upper()
         timeframe = st.selectbox("Zaman", ["15m", "1h", "4h", "1d"], index=2)
         mode = st.radio("Mod", ["Scalper", "Swing", "Day Trader"])
@@ -271,7 +299,7 @@ def main():
         df = market.fetch_ohlcv(symbol, timeframe)
         if df.empty:
             st.error(f"Veri alınamadı. {exchange_id} borsasında {symbol} olmayabilir veya erişim engeli var.")
-            st.info("İPUCU: Streamlit Cloud (ABD) sunucularında 'kraken' veya 'coinbase' en iyi sonucu verir.")
+            st.info("İPUCU: Streamlit Cloud (ABD) sunucularında 'kraken' veya 'coinbase' en iyi sonucu verir. Eğer OKX kullanıyorsanız, lokal çalışmada sorun olmayabilir ancak Cloud'da kısıtlanabilir.")
             st.stop()
         
         df = market.add_indicators(df)
@@ -289,8 +317,11 @@ def main():
         st.plotly_chart(create_advanced_chart(df, symbol), use_container_width=True)
     
     with tab2:
+        # Derinlik Verisi Kontrolü
         bids, asks = market.fetch_order_book(symbol)
         st.plotly_chart(create_depth_chart(bids, asks), use_container_width=True)
+        if bids.empty:
+            st.warning(f"⚠️ {exchange_id.upper()} borsasından derinlik verisi çekilemedi. Bağlantı kısıtlaması olabilir.")
 
     with tab3:
         if st.button("AI Analizi Başlat"):
