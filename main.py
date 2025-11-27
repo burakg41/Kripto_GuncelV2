@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import ccxt
 import google.generativeai as genai
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -9,6 +8,16 @@ import feedparser
 from PIL import Image
 import time
 import numpy as np
+
+# ---------------------------------------------------------
+# ccxt'i güvenli şekilde import et (ModuleNotFound hata vermesin)
+# ---------------------------------------------------------
+try:
+    import ccxt
+    CCXT_AVAILABLE = True
+except ModuleNotFoundError:
+    ccxt = None
+    CCXT_AVAILABLE = False
 
 # =============================================================================
 # 1. KONFİGÜRASYON VE TEMA
@@ -45,6 +54,10 @@ class MarketDataService:
     """Borsa verilerini CCXT ile çeken gelişmiş servis."""
     
     def __init__(self, exchange_id='binance'):
+        if not CCXT_AVAILABLE:
+            st.error("Bu ortamda 'ccxt' modülü kurulu değil; borsa verisi çekilemez.")
+            raise RuntimeError("ccxt not available")
+
         # Dinamik Borsa Yükleme
         try:
             exchange_class = getattr(ccxt, exchange_id)
@@ -133,7 +146,6 @@ class MarketDataService:
         std = close.rolling(window=bb_len, min_periods=bb_len).std()
         upper = mid + bb_std * std
         lower = mid - bb_std * std
-        # İsimleri pandas_ta ile uyumlu tuttum:
         df['BBM_20_2.0'] = mid
         df['BBU_20_2.0'] = upper
         df['BBL_20_2.0'] = lower
@@ -164,23 +176,21 @@ class MarketDataService:
         df['ADX'] = adx  # Kolay erişim için
 
         # --- Mum Formasyonları ---
-        # Doji: gövde / toplam range çok küçük
         body = (close - open_).abs()
         range_ = high - low
         df['DOJI'] = ((body <= range_ * 0.1) & (range_ > 0)).astype(int)
 
-        # Engulfing (Yutma) – bullish(1), bearish(-1)
         prev_open = open_.shift(1)
         prev_close = close.shift(1)
         bull_engulf = (
-            (prev_close < prev_open) &  # önceki mum ayı
-            (close > open_) &           # şu anki mum boğa
+            (prev_close < prev_open) &
+            (close > open_) &
             (open_ <= prev_close) &
             (close >= prev_open)
         )
         bear_engulf = (
-            (prev_close > prev_open) &  # önceki mum boğa
-            (close < open_) &           # şu anki mum ayı
+            (prev_close > prev_open) &
+            (close < open_) &
             (open_ >= prev_close) &
             (close <= prev_open)
         )
@@ -197,7 +207,6 @@ class AIAnalyst:
         self.vision_model = genai.GenerativeModel('gemini-1.5-flash')
 
     def analyze_market_structure(self, df, news_context, symbol, mode):
-        # Veri setinden son durumu al
         last = df.iloc[-1]
         trend = "YÜKSELİŞ" if last['close'] > last['EMA_200'] else "DÜŞÜŞ"
         
@@ -257,7 +266,6 @@ def create_advanced_chart(df, symbol):
         row_heights=[0.6, 0.2, 0.2]
     )
 
-    # 1. Ana Grafik: Mumlar ve Ortalamalar
     fig.add_trace(
         go.Candlestick(
             x=df['timestamp'],
@@ -271,7 +279,6 @@ def create_advanced_chart(df, symbol):
         col=1
     )
 
-    # EMA'lar
     fig.add_trace(
         go.Scatter(
             x=df['timestamp'],
@@ -293,7 +300,6 @@ def create_advanced_chart(df, symbol):
         col=1
     )
     
-    # Formasyon İşaretleme (Doji)
     doji_points = df[df['DOJI'] != 0]
     if not doji_points.empty:
         fig.add_trace(
@@ -308,7 +314,6 @@ def create_advanced_chart(df, symbol):
             col=1
         )
 
-    # Bollinger Bands (Alan Olarak)
     bb_upper = df.columns[df.columns.str.contains('BBU')][0]
     bb_lower = df.columns[df.columns.str.contains('BBL')][0]
     fig.add_trace(
@@ -334,7 +339,6 @@ def create_advanced_chart(df, symbol):
         col=1
     )
 
-    # 2. Grafik: RSI
     fig.add_trace(
         go.Scatter(
             x=df['timestamp'],
@@ -348,7 +352,6 @@ def create_advanced_chart(df, symbol):
     fig.add_hline(y=70, line_dash="dot", line_color="red", row=2, col=1)
     fig.add_hline(y=30, line_dash="dot", line_color="green", row=2, col=1)
 
-    # 3. Grafik: ADX
     fig.add_trace(
         go.Scatter(
             x=df['timestamp'],
@@ -370,12 +373,10 @@ def create_advanced_chart(df, symbol):
     return fig
 
 def create_depth_chart(bids, asks):
-    """Alıcı ve Satıcı Derinlik Grafiği."""
     fig = go.Figure()
     bids = bids.copy()
     asks = asks.copy()
     
-    # Kümülatif toplam hesapla
     bids['total'] = bids['amount'].cumsum()
     asks['total'] = asks['amount'].cumsum()
 
@@ -413,11 +414,20 @@ def create_depth_chart(bids, asks):
 # =============================================================================
 
 def main():
-    # --- Sidebar Ayarları ---
+    # Eğer ccxt hiç yoksa, daha başta düzgün uyarı ver ve durdur
+    if not CCXT_AVAILABLE:
+        st.error(
+            "Bu ortamda `ccxt` modülü bulunamadı.\n\n"
+            "- GitHub repo kök dizininde **requirements.txt** dosyası olduğundan\n"
+            "- Ve içinde şu satırın yer aldığından emin ol:\n\n"
+            "`ccxt`\n\n"
+            "Daha sonra Streamlit Cloud'da app'i yeniden deploy et."
+        )
+        st.stop()
+
     with st.sidebar:
         st.title("🦅 AlphaTrade Pro")
         
-        # API Key Yönetimi
         api_key = st.secrets.get("GOOGLE_API_KEY", None)
         if not api_key:
             api_key = st.text_input("Gemini API Key", type="password")
@@ -427,7 +437,6 @@ def main():
         
         st.divider()
         
-        # Dinamik Borsa ve Parite Seçimi
         exchange_id = st.selectbox("Borsa Seç", ["binance", "okx", "kraken", "kucoin"], index=0)
         symbol = st.text_input("Parite (Sembol)", value="BTC/USDT").upper()
         timeframe = st.selectbox("Zaman Dilimi", ["15m", "1h", "4h", "1d"], index=2)
@@ -435,13 +444,11 @@ def main():
         st.divider()
         trader_mode = st.radio("Yatırımcı Profili", ["Scalper (Dakikalık)", "Day Trader (Günlük)", "Swing (Haftalık)"])
         
-    # --- Servis Başlatma ---
     market_service = MarketDataService(exchange_id)
     ai_engine = AIAnalyst(api_key)
 
     st.subheader(f"⚡ {exchange_id.upper()} | {symbol} Terminali")
 
-    # Veri Çekme
     with st.spinner(f'{symbol} verileri işleniyor...'):
         df = market_service.fetch_ohlcv(symbol, timeframe)
         
@@ -451,19 +458,16 @@ def main():
             
         df = market_service.add_indicators(df)
         
-        # Son veriler
         current_price = df['close'].iloc[-1]
         prev_close = df['close'].iloc[-2]
         change = ((current_price - prev_close) / prev_close) * 100
         
-        # Dashboard Metrikleri (Renkli)
         col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("Fiyat", f"${current_price:,.2f}", f"{change:.2f}%")
         col2.metric("RSI (Momentum)", f"{df['RSI'].iloc[-1]:.1f}", delta=None)
         col3.metric("ADX (Trend Gücü)", f"{df['ADX'].iloc[-1]:.1f}", help="25 üzeri güçlü trend demektir.")
         col4.metric("ATR (Risk/Volatilite)", f"{df['ATR'].iloc[-1]:.2f}")
         
-        # Basit Sinyal Mantığı
         signal = "NÖTR"
         if df['RSI'].iloc[-1] < 30:
             signal = "AŞIRI SATIM (Al Fırsatı?)"
@@ -471,14 +475,11 @@ def main():
             signal = "AŞIRI ALIM (Sat Fırsatı?)"
         col5.metric("Teknik Sinyal", signal)
 
-    # --- TAB YAPISI ---
     tab_chart, tab_depth, tab_ai, tab_vision = st.tabs(["📊 Pro Grafik", "🌊 Derinlik (Depth)", "🤖 AI Raporu", "👁️ Görsel Analiz"])
 
     with tab_chart:
-        # Gelişmiş Grafik
         st.plotly_chart(create_advanced_chart(df, symbol), use_container_width=True)
         
-        # Formasyon Tespiti
         with st.expander("🔍 Tespit Edilen Mum Formasyonları"):
             last_candles = df.tail(5)
             found_patterns = []
@@ -495,7 +496,6 @@ def main():
     with tab_depth:
         col_d1, col_d2 = st.columns([3, 1])
         with col_d1:
-            # Order Book Verisi Çek ve Çiz
             bids, asks = market_service.fetch_order_book(symbol)
             if not bids.empty:
                 st.plotly_chart(create_depth_chart(bids, asks), use_container_width=True)
