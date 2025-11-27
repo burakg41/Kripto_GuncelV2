@@ -1,19 +1,5 @@
 import streamlit as st
 import pandas as pd
-
-# --- pandas_ta için otomatik yükleme fallback'i ---
-try:
-    import pandas_ta as ta
-except ModuleNotFoundError:
-    import subprocess, sys
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "pandas_ta"])
-        import pandas_ta as ta
-    except Exception as e:
-        st.error(f"pandas_ta kütüphanesi yüklenemedi: {e}")
-        st.stop()
-# -----------------------------------------------
-
 import ccxt
 import google.generativeai as genai
 import plotly.graph_objects as go
@@ -75,7 +61,7 @@ class MarketDataService:
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             return df
-        except Exception as e:
+        except Exception:
             return pd.DataFrame()
 
     @st.cache_data(ttl=15)
@@ -88,7 +74,7 @@ class MarketDataService:
             bids['side'] = 'bid'
             asks['side'] = 'ask'
             return bids, asks
-        except Exception as e:
+        except Exception:
             return pd.DataFrame(), pd.DataFrame()
 
     @st.cache_data(ttl=300)
@@ -100,37 +86,106 @@ class MarketDataService:
             for entry in feed.entries[:5]:
                 news.append(f"- {entry.title} ({entry.published})")
             return "\n".join(news)
-        except:
+        except Exception:
             return "Haber kaynağına erişilemedi."
 
     @staticmethod
     def add_indicators(df):
-        """Gelişmiş Teknik İndikatörler ve Formasyonlar."""
+        """Gelişmiş Teknik İndikatörler ve Formasyonlar (pandas_ta'sız)."""
         if df.empty:
             return df
-        
-        # --- Trend İndikatörleri ---
-        df['RSI'] = ta.rsi(df['close'], length=14)
-        
-        macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
-        df = pd.concat([df, macd], axis=1)
-        
-        bb = ta.bbands(df['close'], length=20, std=2)
-        df = pd.concat([df, bb], axis=1)
-        
-        df['EMA_50'] = ta.ema(df['close'], length=50)
-        df['EMA_200'] = ta.ema(df['close'], length=200)
-        
-        # --- Volatilite ve Momentum ---
-        df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-        df['ADX'] = ta.adx(df['high'], df['low'], df['close'], length=14)['ADX_14']
-        
-        # --- Mum Formasyonları (Pattern Recognition) ---
-        # Doji: Kararsızlık
-        df['DOJI'] = ta.cdl_pattern(df['open'], df['high'], df['low'], df['close'], name="doji")['CDL_DOJI_10_0.1']
-        # Engulfing: Yutma (Dönüş sinyali)
-        df['ENGULFING'] = ta.cdl_pattern(df['open'], df['high'], df['low'], df['close'], name="engulfing")['CDL_ENGULFING_10_0.1']
-        
+
+        df = df.copy()
+        close = df['close']
+        high = df['high']
+        low = df['low']
+        open_ = df['open']
+
+        # --- RSI (14) ---
+        rsi_len = 14
+        delta = close.diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.rolling(window=rsi_len, min_periods=rsi_len).mean()
+        avg_loss = loss.rolling(window=rsi_len, min_periods=rsi_len).mean()
+        rs = avg_gain / avg_loss.replace(0, np.nan)
+        rsi = 100 - (100 / (1 + rs))
+        df['RSI'] = rsi
+
+        # --- EMA 50 & EMA 200 ---
+        df['EMA_50'] = close.ewm(span=50, adjust=False).mean()
+        df['EMA_200'] = close.ewm(span=200, adjust=False).mean()
+
+        # --- MACD (12,26,9) ---
+        ema_fast = close.ewm(span=12, adjust=False).mean()
+        ema_slow = close.ewm(span=26, adjust=False).mean()
+        macd = ema_fast - ema_slow
+        signal = macd.ewm(span=9, adjust=False).mean()
+        hist = macd - signal
+        df['MACD_12_26_9'] = macd
+        df['MACDs_12_26_9'] = signal
+        df['MACDh_12_26_9'] = hist
+
+        # --- Bollinger Bands (20, 2) ---
+        bb_len = 20
+        bb_std = 2
+        mid = close.rolling(window=bb_len, min_periods=bb_len).mean()
+        std = close.rolling(window=bb_len, min_periods=bb_len).std()
+        upper = mid + bb_std * std
+        lower = mid - bb_std * std
+        # İsimleri pandas_ta ile uyumlu tuttum:
+        df['BBM_20_2.0'] = mid
+        df['BBU_20_2.0'] = upper
+        df['BBL_20_2.0'] = lower
+
+        # --- ATR (14) ---
+        atr_len = 14
+        prev_close = close.shift(1)
+        tr1 = high - low
+        tr2 = (high - prev_close).abs()
+        tr3 = (low - prev_close).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=atr_len, min_periods=atr_len).mean()
+        df['ATR'] = atr
+
+        # --- ADX (14) ---
+        adx_len = 14
+        plus_dm = high.diff()
+        minus_dm = low.diff().mul(-1)
+        plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+        minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+
+        tr_smooth = tr.rolling(window=adx_len, min_periods=adx_len).sum()
+        plus_di = 100 * (plus_dm.rolling(window=adx_len, min_periods=adx_len).sum() / tr_smooth.replace(0, np.nan))
+        minus_di = 100 * (minus_dm.rolling(window=adx_len, min_periods=adx_len).sum() / tr_smooth.replace(0, np.nan))
+        dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)) * 100
+        adx = dx.rolling(window=adx_len, min_periods=adx_len).mean()
+        df['ADX_14'] = adx
+        df['ADX'] = adx  # Kolay erişim için
+
+        # --- Mum Formasyonları ---
+        # Doji: gövde / toplam range çok küçük
+        body = (close - open_).abs()
+        range_ = high - low
+        df['DOJI'] = ((body <= range_ * 0.1) & (range_ > 0)).astype(int)
+
+        # Engulfing (Yutma) – bullish(1), bearish(-1)
+        prev_open = open_.shift(1)
+        prev_close = close.shift(1)
+        bull_engulf = (
+            (prev_close < prev_open) &  # önceki mum ayı
+            (close > open_) &           # şu anki mum boğa
+            (open_ <= prev_close) &
+            (close >= prev_open)
+        )
+        bear_engulf = (
+            (prev_close > prev_open) &  # önceki mum boğa
+            (close < open_) &           # şu anki mum ayı
+            (open_ >= prev_close) &
+            (close <= prev_open)
+        )
+        df['ENGULFING'] = bull_engulf.astype(int) - bear_engulf.astype(int)
+
         return df
 
 class AIAnalyst:
@@ -317,6 +372,8 @@ def create_advanced_chart(df, symbol):
 def create_depth_chart(bids, asks):
     """Alıcı ve Satıcı Derinlik Grafiği."""
     fig = go.Figure()
+    bids = bids.copy()
+    asks = asks.copy()
     
     # Kümülatif toplam hesapla
     bids['total'] = bids['amount'].cumsum()
@@ -379,7 +436,6 @@ def main():
         trader_mode = st.radio("Yatırımcı Profili", ["Scalper (Dakikalık)", "Day Trader (Günlük)", "Swing (Haftalık)"])
         
     # --- Servis Başlatma ---
-    # Seçilen borsaya göre servisi başlat
     market_service = MarketDataService(exchange_id)
     ai_engine = AIAnalyst(api_key)
 
